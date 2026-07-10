@@ -16,19 +16,48 @@ llm = Llama(
     verbose=False,
 )
 print("Model loaded.\n")
+
 HARD_TASK_PROMPTS = {
     "NER": "You are a strict data extraction system. Output ONLY a raw, valid JSON array of strings. Do not use markdown formatting (no ```json), and do not add conversational text.",
     "DEBUG": "You are an expert Python debugger. Output ONLY the corrected Python function. Do not include explanations, and do not use markdown code blocks (no ```python).",
-    "LOGIC": "You are an expert logician. Solve the puzzle accurately. Your final line MUST be exactly written as: 'Answer: [Your final short answer]'.",
-    "CODE_GEN": "You are a senior developer. Output ONLY raw Python code. No explanations, no markdown code blocks."
+    "LOGIC": "You are an expert logician and mathematician. Solve the problem accurately. Your final line MUST be exactly written as: 'Answer: [Your final short answer]'.",
+    "CODE_GEN": "You are a senior developer. Output ONLY raw code. No explanations, no markdown code blocks."
 }
 
-def dev4_classify_and_prompt(task_prompt):
+def analyze_intent(task_prompt):
+    """
+    Analyzes the prompt using Boolean Signatures (combinations of clues) 
+    to aggressively and accurately classify the task without relying on task_id.
+    Returns: (bool: should_route_to_api, str: task_type)
+    """
     p_lower = task_prompt.lower()
-    if "named entities" in p_lower or "json list" in p_lower: return HARD_TASK_PROMPTS["NER"], "NER"
-    elif "bug" in p_lower or "debugger" in p_lower: return HARD_TASK_PROMPTS["DEBUG"], "DEBUG"
-    elif "friends" in p_lower or "puzzle" in p_lower: return HARD_TASK_PROMPTS["LOGIC"], "LOGIC"
-    else: return HARD_TASK_PROMPTS["CODE_GEN"], "CODE_GEN"
+    
+    # 1. Detect Code Debugging (Highest Priority)
+    if ("def " in p_lower or "function" in p_lower or "code" in p_lower) and ("bug" in p_lower or "fix" in p_lower or "error" in p_lower):
+        return True, "DEBUG"
+        
+    # 2. Detect Code Generation
+    if "write a" in p_lower and ("function" in p_lower or "script" in p_lower or "component" in p_lower or "query" in p_lower or "bash" in p_lower or "sql" in p_lower):
+        return True, "CODE_GEN"
+
+    # 3. Detect NER (Extraction) - UPDATED STRUCTURAL SIGNATURE
+    action_match = any(word in p_lower for word in ["extract", "identify", "list all"])
+    # We look for either specific entity words OR the grammatical structure of an extraction prompt
+    entity_match = any(word in p_lower for word in ["named entities", "json", "mentioned in", "from the following", "from this", "in the following"])
+    
+    if action_match and entity_match:
+        return True, "NER"
+        
+    # 4. Detect Logic & Math Puzzles
+    has_digits = any(char.isdigit() for char in task_prompt)
+    if has_digits and any(word in p_lower for word in ["how many", "percentage", "calculate", "remain", "total", "derivative"]):
+        return True, "LOGIC"
+        
+    if ("friends" in p_lower and "each" in p_lower) or ("lies" in p_lower and "truth" in p_lower) or ("puzzle" in p_lower) or ("robot" in p_lower):
+        return True, "LOGIC"
+
+    # If no strict boolean signatures match, it is safe for the local model
+    return False, "GENERAL"
 
 def sanitize_output(raw_text, task_type):
     if not raw_text: return ""
@@ -75,21 +104,23 @@ def call_fireworks_api(system_prompt, user_prompt):
         return f"API Fallback Error ({target_model}): {str(e)}"
 
 def route_and_solve(task_prompt):
-    prompt_lower = task_prompt.lower()
+    """The master pipeline using Boolean Intent Routing."""
     
-    hard_keywords = ["def ", "bug:", "named entities", "json list", "python function", "each own a different"]
+    route_to_api, task_type = analyze_intent(task_prompt)
     
-    if any(keyword in prompt_lower for keyword in hard_keywords):
-        print("   -> [ROUTED TO API] Trapdoor detected.")
-        sys_prompt, task_type = dev4_classify_and_prompt(task_prompt)
+    # Branch A: Cloud Routing (Hard Tasks)
+    if route_to_api:
+        print(f"   -> [ROUTED TO API] Signature matched: {task_type}")
+        sys_prompt = HARD_TASK_PROMPTS.get(task_type, HARD_TASK_PROMPTS["CODE_GEN"])
         raw_answer = call_fireworks_api(sys_prompt, task_prompt)
         return sanitize_output(raw_answer, task_type)
         
-    print("   -> [ROUTED LOCALLY] Running Llama-3.2 (0 Tokens)...")
+    # Branch B: Local Routing (Easy Tasks: Sentiment, Summaries, General QA)
+    print("   -> [ROUTED LOCALLY] Safe task detected (0 Tokens)...")
     try:
         formatted_prompt = (
             f"<|start_header_id|>system<|end_header_id|>\n"
-            f"You are a helpful hackathon assistant. Provide a highly accurate, direct, and concise answer in one sentence.<|eot_id|>"
+            f"You are a helpful hackathon assistant. Provide a highly accurate, direct, and concise answer in one sentence without any conversational preamble.<|eot_id|>"
             f"<|start_header_id|>user<|end_header_id|>\n{task_prompt}<|eot_id|>"
             f"<|start_header_id|>assistant<|end_header_id|>\n"
         )
@@ -99,9 +130,8 @@ def route_and_solve(task_prompt):
         return sanitize_output(raw_answer, "GENERAL")
     except Exception as e:
         print(f"   -> [LOCAL CRASH] {str(e)}. Fallback to API...")
-        sys_prompt, task_type = dev4_classify_and_prompt(task_prompt)
-        raw_answer = call_fireworks_api(sys_prompt, task_prompt)
-        return sanitize_output(raw_answer, task_type)
+        raw_answer = call_fireworks_api(HARD_TASK_PROMPTS["CODE_GEN"], task_prompt)
+        return sanitize_output(raw_answer, "GENERAL")
 
 def main():
     if not os.path.exists(INPUT_PATH):
