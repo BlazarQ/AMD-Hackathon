@@ -152,7 +152,6 @@ def main():
         
         results.append({
             "task_id": task_id,
-            "question": prompt,
             "answer": answer
         })
 
