@@ -11,7 +11,7 @@ MODEL_PATH = "/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
 print("Loading local Llama-3.2 model...")
 llm = Llama(
     model_path=MODEL_PATH,
-    n_ctx=1024,
+    n_ctx=512,
     n_threads=2,  
     verbose=False,
 )
@@ -97,7 +97,7 @@ def call_fireworks_api(system_prompt, user_prompt):
         "temperature": 0.0 
     }
     try:
-        response = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+        response = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=45)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
@@ -125,7 +125,12 @@ def route_and_solve(task_prompt):
             f"<|start_header_id|>assistant<|end_header_id|>\n"
         )
         
-        output = llm(formatted_prompt, max_tokens=100, temperature=0.1)
+        output = llm(
+            formatted_prompt, 
+            max_tokens=60, 
+            temperature=0.1,
+            stop=["<|eot_id|>", "<|end_of_text|>", "\n\n"]
+        )
         raw_answer = output["choices"][0]["text"].strip()
         return sanitize_output(raw_answer, "GENERAL")
     except Exception as e:
