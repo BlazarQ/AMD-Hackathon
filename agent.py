@@ -20,13 +20,13 @@ llm = Llama(
 print("Model loaded.\n")
 
 HARD_TASK_PROMPTS = {
-    "NER": "You are a strict data extraction system. Output ONLY a raw, valid JSON array of strings. Do not use markdown formatting (no ```json), and do not add conversational text.",
-    "DEBUG": "You are an expert code debugger. Output ONLY the corrected function. Do not include explanations, and do not use markdown code blocks.",
-    "LOGIC": "You are an expert logician and mathematician. Solve the problem accurately. Your final line MUST be exactly written as: 'Answer: [Your final short answer]'.",
-    "CODE_GEN": "You are a senior developer. Output ONLY raw code. No explanations, no markdown code blocks.",
-    "SENTIMENT": "You are a sentiment classification system. Classify the sentiment as Positive, Negative, or Neutral, then give a one-sentence justification. Format exactly as: 'Sentiment: <label>. Justification: <reason>'.",
-    "SUMMARY": "You are a precise summarization system. Follow the exact length or format constraint given in the instruction. Output ONLY the summary text, no preamble.",
-    "FACTUAL": "You are a knowledgeable assistant. Give an accurate, concise, direct answer. No conversational preamble, no hedging.",
+    "NER": "Output ONLY a raw JSON array of strings. No markdown. No text.",
+    "DEBUG": "Output ONLY corrected code. No explanations. No markdown.",
+    "LOGIC": "Solve accurately. Final line MUST be exactly: 'Answer: [value]'.",
+    "CODE_GEN": "Output ONLY raw code. No explanations. No markdown.",
+    "SENTIMENT": "Classify as Positive, Negative, or Neutral. Format exactly as: 'Sentiment: <label>. Justification: <reason>'.",
+    "SUMMARY": "Follow the exact length or format constraint. Output ONLY the summary text, no preamble.",
+    "FACTUAL": "Give an accurate, concise, direct answer. No conversational preamble.",
 }
 
 MAX_API_TOKENS = 200
@@ -64,7 +64,7 @@ def analyze_intent(task_prompt):
     if any(word in p_lower for word in summary_words):
         return True, "SUMMARY"
 
-    return True, "FACTUAL"
+    return False, "FACTUAL"
 
 
 def sanitize_output(raw_text, task_type):
@@ -100,7 +100,7 @@ def call_fireworks_api(system_prompt, user_prompt, task_type, retries=1):
     base_url = os.environ.get("FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference/v1")
     allowed_models = os.environ.get("ALLOWED_MODELS", "llama-v3-8b-instruct")
 
-    target_model = allowed_models.split(",").strip()
+    target_model = allowed_models.split(",")[0].strip()
     if "accounts/fireworks/models/" not in target_model:
         target_model = f"accounts/fireworks/models/{target_model}"
 
@@ -123,7 +123,8 @@ def call_fireworks_api(system_prompt, user_prompt, task_type, retries=1):
         try:
             response = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=45)
             response.raise_for_status()
-            content = response.json()["choices"]["message"]["content"].strip()
+            
+            content = response.json()["choices"][0]["message"]["content"].strip()
 
             if task_type == "NER":
                 try:
@@ -164,7 +165,9 @@ def route_and_solve(task_prompt):
             temperature=0.1,
             stop=["<|eot_id|>", "<|end_of_text|>"]
         )
-        raw_answer = output["choices"]["text"].strip()
+        
+        raw_answer = output["choices"][0]["text"].strip()
+        
         return sanitize_output(raw_answer, "GENERAL")
     except Exception as e:
         print(f" -> [LOCAL CRASH] {str(e)}. Fallback to API...")
