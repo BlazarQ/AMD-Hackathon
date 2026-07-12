@@ -9,6 +9,63 @@ INPUT_PATH = "/input/tasks.json"
 OUTPUT_PATH = "/output/results.json"
 MODEL_PATH = "/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
 
+TOTAL_BUDGET_SECONDS = 540
+API_TIMEOUT_SECONDS = 16
+
+SYSTEM_PROMPTS = {
+    "FACTUAL": (
+        "Answer accurately and directly. Follow any format, length, or style "
+        "constraint in the user prompt. Do not add a conversational preamble."
+    ),
+    "MATH": (
+        "Solve the problem accurately. Return a concise final answer. Show only "
+        "minimal working when it is necessary to make the answer clear."
+    ),
+    "SENTIMENT": (
+        "Classify the sentiment of the supplied text. Use the labels requested "
+        "by the user. If no labels are specified, answer only: Positive, "
+        "Negative, Neutral, or Mixed."
+    ),
+    "SUMMARY": (
+        "Summarize only the supplied text. Strictly follow any requested "
+        "sentence count, word limit, format, or length constraint. "
+        "Output only the summary."
+    ),
+    "NER": (
+        "Extract the requested named entities. Output only valid JSON with no "
+        "Markdown. Follow the user's requested schema exactly. If no schema is "
+        "given, return a JSON array of objects with text and type fields."
+    ),
+    "DEBUG": (
+        "Fix the supplied code. Return only the complete corrected code. "
+        "Do not use Markdown fences and do not include explanations."
+    ),
+    "LOGIC": (
+        "Solve the constraint problem carefully. Return only a concise final "
+        "answer unless the user explicitly requests reasoning."
+    ),
+    "CODE_GEN": (
+        "Write a correct, complete implementation meeting the specification. "
+        "Return only raw code, with no Markdown fences or explanation."
+    ),
+}
+
+API_TASKS = {"NER", "DEBUG", "LOGIC", "CODE_GEN"}
+
+API_MAX_TOKENS = {
+    "NER": 140,
+    "DEBUG": 220,
+    "LOGIC": 110,
+    "CODE_GEN": 240,
+}
+
+LOCAL_MAX_TOKENS = {
+    "FACTUAL": 90,
+    "MATH": 110,
+    "SENTIMENT": 45,
+    "SUMMARY": 120,
+}
+
 print("Loading local Llama-3.2 model...")
 llm = Llama(
     model_path=MODEL_PATH,
@@ -17,194 +74,209 @@ llm = Llama(
     n_batch=256,
     verbose=False,
 )
-print("Model loaded.\n")
+print("Model loaded.")
 
-HARD_TASK_PROMPTS = {
-    "NER": "Output ONLY a raw JSON array of strings. No markdown. No text.",
-    "DEBUG": "Output ONLY corrected code. No explanations. No markdown.",
-    "LOGIC": "Solve accurately. Final line MUST be exactly: 'Answer: [value]'.",
-    "CODE_GEN": "Output ONLY raw code. No explanations. No markdown.",
-    "SENTIMENT": "Classify as Positive, Negative, or Neutral. Format exactly as: 'Sentiment: <label>. Justification: <reason>'.",
-    "SUMMARY": "Follow the exact length or format constraint. Output ONLY the summary text, no preamble.",
-    "FACTUAL": "Give an accurate, concise, direct answer. No conversational preamble.",
-}
 
-MAX_API_TOKENS = 200
+def analyze_intent(prompt):
+    p = prompt.lower()
 
-def analyze_intent(task_prompt):
-    p_lower = task_prompt.lower()
+    if any(x in p for x in (
+        "summarize", "summarise", "summary", "condense",
+        "tl;dr", "brief summary", "shorten"
+    )):
+        return "SUMMARY"
 
-    if any(w in p_lower for w in ["def ", "function", "code", "script", "snippet"]) and \
-       any(w in p_lower for w in ["bug", "fix", "error", "wrong", "fail", "incorrect", "issue"]):
-        return True, "DEBUG"
+    if any(x in p for x in (
+        "sentiment", "classify the tone", "classify the emotion",
+        "positive or negative", "opinion expressed"
+    )):
+        return "SENTIMENT"
 
-    if any(w in p_lower for w in ["write a", "create a", "implement", "generate", "develop"]) and \
-       any(w in p_lower for w in ["function", "script", "component", "query", "bash", "sql", "program"]):
-        return True, "CODE_GEN"
+    code_markers = (
+        "def ", "function", "code", "script", "snippet",
+        "class ", "sql", "bash", "program"
+    )
+    bug_markers = (
+        "bug", "fix", "error", "wrong", "fails",
+        "failed", "incorrect", "debug", "issue"
+    )
 
-    action_match = any(word in p_lower for word in ["extract", "identify", "list all", "find all"])
-    entity_match = any(word in p_lower for word in ["named entities", "json", "mentioned in", "from the following", "from this", "in the following"])
-    if action_match and entity_match:
-        return True, "NER"
+    if any(x in p for x in code_markers) and any(x in p for x in bug_markers):
+        return "DEBUG"
 
-    has_digits = any(char.isdigit() for char in task_prompt)
-    math_words = ["how many", "percentage", "calculate", "remain", "total", "derivative", "solve", "evaluate", "value of", "probability", "equation"]
-    if has_digits and any(word in p_lower for word in math_words):
-        return True, "LOGIC"
+    if any(x in p for x in (
+        "write a", "create a", "implement", "generate",
+        "develop", "build a"
+    )) and any(x in p for x in code_markers):
+        return "CODE_GEN"
 
-    logic_words = ["friends", "lies", "truth", "puzzle", "robot", "who is", "order", "assume", "statements", "sequence"]
-    if any(word in p_lower for word in logic_words):
-        return True, "LOGIC"
+    if any(x in p for x in (
+        "named entity", "named entities", "extract entities",
+        "extract all entities", "entities and their types"
+    )):
+        return "NER"
 
-    sentiment_words = ["sentiment", "positive or negative", "classify the tone", "classify the emotion", "how does this review", "opinion expressed"]
-    if any(word in p_lower for word in sentiment_words):
-        return True, "SENTIMENT"
+    if any(x in p for x in (
+        "logic puzzle", "all conditions", "each owns",
+        "who owns", "truth", "lies", "deduce",
+        "constraint", "different pet"
+    )):
+        return "LOGIC"
 
-    summary_words = ["summarize", "summarise", "condense", "in one sentence", "in exactly", "tl;dr", "shorten", "brief summary"]
-    if any(word in p_lower for word in summary_words):
-        return True, "SUMMARY"
+    if any(x in p for x in (
+        "calculate", "how many", "percentage", "probability",
+        "equation", "derivative", "evaluate", "solve for",
+        "remain", "total", "value of"
+    )):
+        return "MATH"
 
-    return False, "FACTUAL"
+    return "FACTUAL"
 
 
 def sanitize_output(raw_text, task_type):
-    if not raw_text:
-        return ""
-    cleaned = raw_text.strip()
-    cleaned = re.sub(r"^```[a-zA-Z0-9]*\n", "", cleaned)
-    cleaned = re.sub(r"\n```$", "", cleaned)
-    cleaned = cleaned.strip("`").strip()
+    cleaned = (raw_text or "").strip()
+
+    cleaned = re.sub(
+        r"^```(?:json|python|javascript|typescript|sql|bash|text)?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
 
     if task_type == "NER":
-        candidate = cleaned
-        if not candidate.startswith("["):
-            candidate = "[" + candidate
-        if not candidate.endswith("]"):
-            candidate = candidate + "]"
         try:
-            json.loads(candidate)
-            return candidate
-        except Exception:
-            return candidate 
-    elif task_type == "LOGIC":
-        lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
-        for line in reversed(lines):
-            if line.startswith("Answer:"):
-                return line.replace("Answer:", "").strip()
-        return cleaned
+            parsed = json.loads(cleaned)
+            return json.dumps(parsed, ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError):
+            return "[]"
+
     return cleaned
 
 
-def call_fireworks_api(system_prompt, user_prompt, task_type, retries=1):
+def call_fireworks_api(system_prompt, user_prompt, task_type):
     api_key = os.environ.get("FIREWORKS_API_KEY")
-    base_url = os.environ.get("FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference/v1")
-    allowed_models = os.environ.get("ALLOWED_MODELS", "llama-v3-8b-instruct")
+    base_url = os.environ.get("FIREWORKS_BASE_URL", "").rstrip("/")
+    allowed_models = os.environ.get("ALLOWED_MODELS", "")
+
+    if not api_key or not base_url or not allowed_models:
+        return ""
 
     target_model = allowed_models.split(",")[0].strip()
-    if "accounts/fireworks/models/" not in target_model:
-        target_model = f"accounts/fireworks/models/{target_model}"
 
-    if not api_key:
-        return "Error: FIREWORKS_API_KEY environment variable is not set."
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": target_model,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
+            {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.0,
-        "max_tokens": MAX_API_TOKENS,
+        "max_tokens": API_MAX_TOKENS[task_type],
     }
 
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            response = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=45)
-            response.raise_for_status()
-            
-            content = response.json()["choices"][0]["message"]["content"].strip()
-
-            if task_type == "NER":
-                try:
-                    json.loads(sanitize_output(content, "NER"))
-                except Exception:
-                    if attempt < retries:
-                        time.sleep(1)
-                        continue
-            return content
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(1)
-                continue
-    return f"API Fallback Error ({target_model}): {str(last_err)}"
-
-
-def route_and_solve(task_prompt):
-    route_to_api, task_type = analyze_intent(task_prompt)
-
-    if route_to_api:
-        print(f" -> [ROUTED TO API] Signature matched: {task_type}")
-        sys_prompt = HARD_TASK_PROMPTS.get(task_type, HARD_TASK_PROMPTS["FACTUAL"])
-        raw_answer = call_fireworks_api(sys_prompt, task_prompt, task_type)
-        return sanitize_output(raw_answer, task_type)
-
-    print(" -> [ROUTED LOCALLY] Safe task detected (0 Tokens)...")
     try:
-        formatted_prompt = (
-            f"<|start_header_id|>system<|end_header_id|>\n"
-            f"You are a helpful hackathon assistant. Provide a highly accurate, direct, and concise answer without any conversational preamble.<|eot_id|>\n"
-            f"<|start_header_id|>user<|end_header_id|>\n{task_prompt}<|eot_id|>\n"
-            f"<|start_header_id|>assistant<|end_header_id|>\n"
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=API_TIMEOUT_SECONDS,
         )
-        output = llm(
-            formatted_prompt,
-            max_tokens=150,
-            temperature=0.1,
-            stop=["<|eot_id|>", "<|end_of_text|>"]
-        )
-        
-        raw_answer = output["choices"][0]["text"].strip()
-        
-        return sanitize_output(raw_answer, "GENERAL")
-    except Exception as e:
-        print(f" -> [LOCAL CRASH] {str(e)}. Fallback to API...")
-        raw_answer = call_fireworks_api(HARD_TASK_PROMPTS["FACTUAL"], task_prompt, "FACTUAL")
-        return sanitize_output(raw_answer, "GENERAL")
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
+        print(f"API failure for {task_type}: {exc}")
+        return ""
+
+
+def call_local(system_prompt, user_prompt, task_type):
+    formatted_prompt = (
+        "<|start_header_id|>system<|end_header_id|>\n"
+        f"{system_prompt}<|eot_id|>\n"
+        "<|start_header_id|>user<|end_header_id|>\n"
+        f"{user_prompt}<|eot_id|>\n"
+        "<|start_header_id|>assistant<|end_header_id|>\n"
+    )
+
+    output = llm(
+        formatted_prompt,
+        max_tokens=LOCAL_MAX_TOKENS.get(task_type, 100),
+        temperature=0.0,
+        stop=["<|eot_id|>", "<|end_of_text|>"],
+    )
+    return output["choices"][0]["text"].strip()
+
+
+def route_and_solve(task_prompt, started_at):
+    task_type = analyze_intent(task_prompt)
+    system_prompt = SYSTEM_PROMPTS[task_type]
+
+    elapsed = time.monotonic() - started_at
+    remaining = TOTAL_BUDGET_SECONDS - elapsed
+
+    if task_type in API_TASKS and remaining > API_TIMEOUT_SECONDS + 12:
+        print(f" -> API: {task_type}")
+        answer = call_fireworks_api(system_prompt, task_prompt, task_type)
+        if answer:
+            return sanitize_output(answer, task_type)
+
+        print(" -> API unavailable; using local fallback")
+
+    print(f" -> LOCAL: {task_type}")
+    try:
+        answer = call_local(system_prompt, task_prompt, task_type)
+        return sanitize_output(answer, task_type)
+    except Exception as exc:
+        print(f" -> Local inference failure: {exc}")
+        return "[]" if task_type == "NER" else ""
+
+
+def write_results(results):
+    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
 
 
 def main():
-    if not os.path.exists(INPUT_PATH):
-        print(f"Error: {INPUT_PATH} not found.")
-        return
+    started_at = time.monotonic()
 
-    with open(INPUT_PATH, "r") as f:
+    if not os.path.exists(INPUT_PATH):
+        raise FileNotFoundError(f"{INPUT_PATH} not found")
+
+    with open(INPUT_PATH, "r", encoding="utf-8") as f:
         tasks = json.load(f)
 
     results = []
-    print("Processing tasks...\n")
-    for i, task in enumerate(tasks, 1):
-        task_id = task["task_id"]
+    print(f"Processing {len(tasks)} tasks...")
+
+    for index, task in enumerate(tasks, start=1):
+        task_id = task.get("task_id", "")
         prompt = task.get("prompt", "")
 
-        print(f"[{i}/{len(tasks)}] Processing Task: {task_id}")
+        if time.monotonic() - started_at >= TOTAL_BUDGET_SECONDS:
+            print("Time budget reached; writing completed results.")
+            break
+
+        print(f"[{index}/{len(tasks)}] {task_id}")
+
         try:
-            answer = route_and_solve(prompt)
-        except Exception as e:
-            answer = f"Error: {str(e)}"
+            answer = route_and_solve(prompt, started_at)
+        except Exception as exc:
+            print(f"Task failure: {exc}")
+            answer = ""
 
         results.append({
             "task_id": task_id,
-            "answer": answer
+            "answer": answer,
         })
 
-    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-    with open(OUTPUT_PATH, "w") as f:
-        json.dump(results, f, indent=4)
 
-    print("\nExecution complete. Results written to /output/results.json")
+        write_results(results)
+
+    write_results(results)
+    print(f"Done. Wrote {len(results)} results to {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
